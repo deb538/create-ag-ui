@@ -1,0 +1,221 @@
+Here is the 3-Tier Monorepo architecture you requested. This setup gives you the specific "Google ADK" backend you want, the "Vanilla React" frontend you prefer, and the "Node Middleware" required to glue them together with CopilotKit.
+
+Folder Structure
+Create a root folder my-ag-ui-app with this structure:
+
+Plaintext
+
+my-ag-ui-app/
+├── packages/
+│   ├── agent/         # (Tier 3) Python Google ADK Agent
+│   ├── middleware/    # (Tier 2) Node.js Copilot Runtime
+│   └── ui/            # (Tier 1) Vanilla React Chatbot
+└── package.json       # (Optional) Root scripts to run everything
+1. The Agent (Python + Google ADK)
+This backend runs your Google ADK agent and exposes it as a "Remote Action" that CopilotKit can call.
+
+Path: packages/agent Dependencies: pip install fastapi uvicorn google-adk copilotkit
+
+File: packages/agent/main.py
+
+Python
+
+import uvicorn
+from fastapi import FastAPI
+from google.adk.agents import Agent
+from copilotkit.integrations.fastapi import add_fastapi_endpoint
+from copilotkit import CopilotKitRemoteEndpoint, Action
+
+# --- 1. Define your Google ADK Agent ---
+# (This is a simplified example. Replace with your complex ADK logic)
+adk_agent = Agent(
+    model="gemini-1.5-flash",
+    name="specialist_agent",
+    instruction="You are a helpful AI assistant specialized in log analysis."
+)
+
+# --- 2. Wrap ADK Agent as a Callable Tool ---
+async def ask_adk_agent(query: str) -> str:
+    """
+    Passes the user query to the Google ADK agent and returns the text response.
+    """
+    # ADK's 'prompt' method sends the query to the agent
+    response = adk_agent.prompt(query)
+    return response.text
+
+# --- 3. Setup CopilotKit Remote Endpoint ---
+# We expose the ADK agent as a specific "Action" the runtime can use.
+sdk = CopilotKitRemoteEndpoint(
+    actions=[
+        Action(
+            name="ask_adk_agent",
+            handler=ask_adk_agent,
+            description="Call this agent to answer questions using Google ADK logic.",
+            parameters=[
+                {"name": "query", "type": "string", "description": "The user's question"}
+            ]
+        )
+    ]
+)
+
+# --- 4. FastAPI Server ---
+app = FastAPI()
+add_fastapi_endpoint(app, sdk, "/copilotkit")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+2. The Middleware (Node.js)
+This serves as the "Brain" that manages the conversation state and decides when to call your Python agent.
+
+Path: packages/middleware Dependencies: npm install express cors @copilotkit/runtime
+
+File: packages/middleware/server.js
+
+JavaScript
+
+import express from "express";
+import cors from "cors";
+import { CopilotRuntime, copilotRuntimeNodeHttpEndpoint } from "@copilotkit/runtime";
+
+const app = express();
+app.use(cors()); // Allow requests from your React UI
+
+const port = 4000;
+
+// Initialize Runtime and point it to your Python Agent
+const runtime = new CopilotRuntime({
+  remoteEndpoints: [
+    { url: "http://localhost:8000/copilotkit" } // Points to Python/FastAPI
+  ]
+});
+
+// The endpoint your React App talks to
+app.use("/copilotkit", (req, res, next) => {
+  const handler = copilotRuntimeNodeHttpEndpoint({
+    endpoint: "/copilotkit",
+    runtime,
+    serviceAdapter: { 
+        // A minimal adapter is required to handle the "Orchestration"
+        // You can use OpenAI or Anthropic here as the "Router" LLM
+        // or a simple specific adapter if using a single model.
+        // Ideally, you pass your OpenAI/Gemini key here to drive the conversation.
+        // For Google/Gemini specifically:
+        // import { GoogleGenerativeAIAdapter } from "@copilotkit/runtime";
+        // see docs for specific adapter instantiation
+    }, 
+  });
+  return handler(req, res, next);
+});
+
+app.listen(port, () => {
+  console.log(`Middleware running at http://localhost:${port}/copilotkit`);
+});
+3. The UI (Vanilla React)
+This is your custom frontend with a Side Panel and Chat Area.
+
+Path: packages/ui Setup: npm create vite@latest . -- --template react Dependencies: npm install @copilotkit/react-core @copilotkit/react-ui
+
+File: packages/ui/src/App.jsx
+
+JavaScript
+
+import React from 'react';
+import { CopilotKit } from "@copilotkit/react-core";
+import ChatArea from './ChatArea';
+import SidePanel from './SidePanel';
+import './App.css'; // Assume basic CSS for flex layout
+
+function App() {
+  return (
+    // Point to your NODE MIDDLEWARE (Port 4000), not Python directly
+    <CopilotKit runtimeUrl="http://localhost:4000/copilotkit">
+      <div className="app-container" style={{ display: 'flex', height: '100vh' }}>
+        
+        {/* Left: Side Panel for Context/History */}
+        <div className="side-panel" style={{ width: '300px', borderRight: '1px solid #ccc' }}>
+          <SidePanel />
+        </div>
+
+        {/* Right: Active Chat Area */}
+        <div className="main-chat" style={{ flex: 1 }}>
+          <ChatArea />
+        </div>
+
+      </div>
+    </CopilotKit>
+  );
+}
+
+export default App;
+File: packages/ui/src/ChatArea.jsx
+
+JavaScript
+
+import React from 'react';
+import { useCopilotChat } from "@copilotkit/react-core";
+
+const ChatArea = () => {
+  // Hook to interact with the runtime
+  const { visibleMessages, appendMessage, isLoading } = useCopilotChat();
+
+  const handleSend = (e) => {
+    if (e.key === "Enter" && e.target.value.trim()) {
+      appendMessage({ role: "user", content: e.target.value });
+      e.target.value = "";
+    }
+  };
+
+  return (
+    <div style={{ padding: '20px', height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <h2>Chat with ADK Agent</h2>
+      
+      {/* Message List */}
+      <div style={{ flex: 1, overflowY: 'auto', marginBottom: '20px' }}>
+        {visibleMessages.map((msg, i) => (
+          <div key={i} style={{ 
+            textAlign: msg.role === 'user' ? 'right' : 'left',
+            margin: '10px 0',
+            padding: '10px',
+            background: msg.role === 'user' ? '#e1f5fe' : '#f0f0f0',
+            borderRadius: '8px'
+          }}>
+            <strong>{msg.role}:</strong> {msg.content}
+          </div>
+        ))}
+        {isLoading && <div><em>Agent is thinking...</em></div>}
+      </div>
+
+      {/* Input Box */}
+      <input 
+        type="text" 
+        placeholder="Type a message..." 
+        onKeyDown={handleSend}
+        style={{ padding: '10px', width: '100%' }}
+      />
+    </div>
+  );
+};
+
+export default ChatArea;
+How to Run It
+You will need 3 terminal tabs:
+
+Terminal 1 (Python):
+
+Bash
+
+cd packages/agent
+# Ensure env is active
+python main.py
+Terminal 2 (Node):
+
+Bash
+
+cd packages/middleware
+node server.js
+Terminal 3 (React):
+
+Bash
+
+cd packages/ui
+npm run dev
